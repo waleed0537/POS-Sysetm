@@ -668,6 +668,7 @@ function buildReceiptHTML(sale, items, settings) {
 </head>
 <body>
 
+
   <!-- HEADER -->
   <div class="header">
     <div class="shop-name">${esc(settings.shop_name)}</div>
