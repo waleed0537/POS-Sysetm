@@ -39,12 +39,48 @@ function navigate(page) {
   );
   const container = document.getElementById('page-container');
   container.innerHTML = '';
-  const pages = { dashboard, pos: posPage, products: productsPage, sales, expenses, settings: settingsPage, repairs: repairHistory };
+  const pages = { dashboard, pos: posPage, products: productsPage, sales, expenses, settings: settingsPage };
   if (pages[page]) pages[page](container);
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const cur = (v) => `${settings.currency || '€'}${Number(v).toFixed(2)}`;
+
+// ── VAT ───────────────────────────────────────────────────────────────────────
+// Repairs: flat 13% VAT on the whole job.
+// Sales: 23% VAT on everything EXCEPT items in the "Mobile" category (phone
+// purchases carry no VAT — second-hand margin scheme).
+const VAT_STANDARD_RATE = 0.23;
+const VAT_REPAIR_RATE = 0.13;
+function isPhoneCategory(name) {
+  const c = String(name || '').toLowerCase().trim();
+  return c === 'mobile' || c === 'phone' || c === 'phones';
+}
+function computeVatAnalysis(saleType, items, discount) {
+  const isRepair = (saleType || '').toLowerCase() === 'repair';
+  discount = Number(discount) || 0;
+
+  if (isRepair) {
+    const subtotal = items.reduce((s, i) => s + i.price * i.quantity, 0);
+    const net = Math.max(subtotal - discount, 0);
+    const vat = net * VAT_REPAIR_RATE;
+    return { rows: [{ rate: 13, net, vat, total: net + vat }], totalVat: vat };
+  }
+
+  let phoneSub = 0, otherSub = 0;
+  items.forEach(i => {
+    const amt = i.price * i.quantity;
+    if (isPhoneCategory(i.category_name)) phoneSub += amt;
+    else otherSub += amt;
+  });
+  const totalSub = phoneSub + otherSub;
+  const discOther = totalSub > 0 ? discount * (otherSub / totalSub) : discount;
+  const otherNet = Math.max(otherSub - discOther, 0);
+  const vat = otherNet * VAT_STANDARD_RATE;
+  const rows = [];
+  if (otherNet > 0) rows.push({ rate: 23, net: otherNet, vat, total: otherNet + vat });
+  return { rows, totalVat: vat };
+}
 
 function toast(msg, type = 'success') {
   const t = document.createElement('div');
@@ -149,6 +185,7 @@ async function posPage(el) {
   let activeCat = 'all';
   let searchQ = '';
   let saleType = 'sale'; // 'sale' or 'repair'
+  let imeiList = []; // multiple IMEIs for a mobile phone sale
 
   el.innerHTML = `
     <div class="pos-layout">
@@ -193,7 +230,7 @@ async function posPage(el) {
             </div>
             <div class="total-row"><span>Subtotal</span><span id="t-sub" class="mono">-</span></div>
             <div class="total-row"><span>Discount</span><span id="t-disc" class="mono text-red">-</span></div>
-            <div class="total-row"><span>Tax (${settings.tax_rate || 0}%)</span><span id="t-tax" class="mono">-</span></div>
+            <div class="total-row"><span>VAT</span><span id="t-tax" class="mono">-</span></div>
             <div class="total-row grand"><span>TOTAL</span><span id="t-total" class="mono text-accent">-</span></div>
           </div>
           <div class="cart-actions">
@@ -247,10 +284,41 @@ async function posPage(el) {
           <input class="form-input" id="cust-name" placeholder="Customer Name" style="font-size:12px;padding:7px 10px"/>
           <input class="form-input" id="cust-phone" placeholder="Phone Number" style="font-size:12px;padding:7px 10px"/>
         </div>
-        <input class="form-input" id="cust-imei" placeholder="IMEI (for mobile sales)" style="font-size:12px;padding:7px 10px;width:100%"/>
+        <input class="form-input" id="cust-model" placeholder="Model Number (for mobile sales)" style="font-size:12px;padding:7px 10px;width:100%;margin-bottom:8px"/>
+        <div style="display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;margin-bottom:6px">
+          <input class="form-input" id="cust-imei-input" placeholder="IMEI (for mobile sales)" style="font-size:12px;padding:7px 10px" onkeydown="if(event.key==='Enter'){event.preventDefault();addImei();}"/>
+          <button type="button" class="btn btn-ghost btn-sm" onclick="addImei()">+ Add IMEI</button>
+        </div>
+        <div id="imei-chip-list" style="display:flex;flex-wrap:wrap;gap:6px"></div>
       `;
+      renderImeiChips();
     }
   }
+
+  function renderImeiChips() {
+    const box = document.getElementById('imei-chip-list');
+    if (!box) return;
+    box.innerHTML = imeiList.map((imei, idx) => `
+      <span class="badge badge-green" style="display:inline-flex;align-items:center;gap:6px;font-family:'IBM Plex Mono',monospace">
+        ${imei}
+        <span style="cursor:pointer;font-weight:700" onclick="removeImei(${idx})">✕</span>
+      </span>
+    `).join('') || '<span style="font-size:11px;color:var(--text3)">No IMEIs added yet</span>';
+  }
+
+  window.addImei = () => {
+    const input = document.getElementById('cust-imei-input');
+    const val = input?.value.trim();
+    if (!val) return;
+    if (imeiList.includes(val)) { toast('IMEI already added', 'error'); return; }
+    imeiList.push(val);
+    input.value = '';
+    renderImeiChips();
+  };
+  window.removeImei = (idx) => {
+    imeiList.splice(idx, 1);
+    renderImeiChips();
+  };
 
   window.addRepairCharge = () => {
     const desc = document.getElementById('repair-desc')?.value.trim() || 'Repair Charge';
@@ -346,8 +414,8 @@ async function posPage(el) {
         sale_type: 'sale',
         customer_name: document.getElementById('cust-name')?.value.trim() || '',
         customer_phone: document.getElementById('cust-phone')?.value.trim() || '',
-        customer_imei: document.getElementById('cust-imei')?.value.trim() || '',
-        customer_model: '',
+        customer_imei: imeiList.join(', '),
+        customer_model: document.getElementById('cust-model')?.value.trim() || '',
         customer_fault: '',
       };
     }
@@ -410,9 +478,10 @@ function renderCart() {
 function renderCartTotals() {
   const subtotal = cart.reduce((s, i) => s + i.price * i.quantity, 0);
   const discount = parseFloat(document.getElementById('discount-val')?.value || 0) || 0;
-  const taxRate = parseFloat(settings.tax_rate || 0) / 100;
+  const saleType = (window._getSaleType && window._getSaleType()) || 'sale';
   const taxable = Math.max(subtotal - discount, 0);
-  const tax = taxable * taxRate;
+  const { totalVat } = computeVatAnalysis(saleType, cart, discount);
+  const tax = totalVat;
   const total = taxable + tax;
   const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
   set('t-sub', cur(subtotal));
@@ -435,11 +504,10 @@ window.clearCart = () => { cart = []; renderCart(); };
 function openPayment() {
   const subtotal = cart.reduce((s, i) => s + i.price * i.quantity, 0);
   const discount = parseFloat(document.getElementById('discount-val')?.value || 0) || 0;
-  const taxRate = parseFloat(settings.tax_rate || 0) / 100;
   const taxable = Math.max(subtotal - discount, 0);
-  const tax = taxable * taxRate;
-  const total = taxable + tax;
   const saleType = (window._getSaleType && window._getSaleType()) || 'sale';
+  const { totalVat: tax } = computeVatAnalysis(saleType, cart, discount);
+  const total = taxable + tax;
   const isRepair = saleType === 'repair';
   const customerName = document.getElementById('cust-name')?.value.trim() || '';
 
@@ -448,8 +516,15 @@ function openPayment() {
       <div style="font-size:13px;color:var(--text2);margin-bottom:12px">
         ${isRepair ? `Repair job for <strong>${customerName || 'customer'}</strong> · ` : ''}${cart.length} item(s)
       </div>
-      <div style="font-size:28px;font-weight:700;font-family:'IBM Plex Mono';color:var(--accent);margin-bottom:20px">
+      <div style="font-size:28px;font-weight:700;font-family:'IBM Plex Mono';color:var(--accent);margin-bottom:16px">
         Total: ${cur(total)}
+      </div>
+      <div class="form-group">
+        <div class="form-label" style="margin-bottom:6px">Payment Method</div>
+        <div class="payment-grid" id="payment-method-toggle" style="margin-bottom:0">
+          <button type="button" class="pay-method active" data-method="cash" onclick="setPaymentMethod(this,'cash')">💵 Cash</button>
+          <button type="button" class="pay-method" data-method="card" onclick="setPaymentMethod(this,'card')">💳 Card</button>
+        </div>
       </div>
       <div class="form-group">
         <div class="form-label">Amount Received</div>
@@ -469,6 +544,11 @@ function openPayment() {
   `);
 }
 
+window.setPaymentMethod = (btn, method) => {
+  document.querySelectorAll('#payment-method-toggle .pay-method').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+};
+
 window.calcChange = (total) => {
   const paid = parseFloat(document.getElementById('amount-paid').value) || 0;
   const change = Math.max(paid - total, 0);
@@ -478,7 +558,10 @@ window.calcChange = (total) => {
 window.completeSale = async (subtotal, discount, tax, total) => {
   const paid = parseFloat(document.getElementById('amount-paid')?.value || total) || total;
   const change = Math.max(paid - total, 0);
+  // Flush any IMEI typed but not explicitly added with the "+ Add IMEI" button
+  if (window.addImei && document.getElementById('cust-imei-input')?.value.trim()) window.addImei();
   const customerFields = (window._getCustomerFields && window._getCustomerFields()) || {};
+  const paymentMethod = document.querySelector('#payment-method-toggle .pay-method.active')?.dataset.method || 'cash';
 
   // Repair charges have a string id — map them to product_id 0 for the backend
   const sanitisedItems = cart.map(item => ({
@@ -489,7 +572,7 @@ window.completeSale = async (subtotal, discount, tax, total) => {
   const result = await pos.completeSale({
     items: sanitisedItems,
     subtotal, discount, tax, total,
-    payment_method: 'sale',
+    payment_method: paymentMethod,
     amount_paid: paid,
     change_due: change,
     ...customerFields
@@ -517,58 +600,38 @@ async function showReceiptModal(receiptNo, saleId) {
   const currency = settings.currency || '€';
   const isRepair = (sale.sale_type || '') === 'repair';
 
-  // Check if any item is from Mobile or Repair category
-  const hasMobileOrRepair = isRepair || items.some(i => {
-    const cat = String(i.category_name || '').toLowerCase().trim();
-    return cat === 'mobile' || cat === 'repair';
-  });
-
   const itemLines = items.map(i =>
     `${(i.name + '').substring(0, 20).padEnd(20)} ${String(i.quantity).padStart(3)} x ${currency}${Number(i.price).toFixed(2)}\n` +
     `${''.padEnd(30)}= ${currency}${Number(i.subtotal).toFixed(2)}`
   );
 
+  const imeiList = (sale.customer_imei || '').split(',').map(s => s.trim()).filter(Boolean);
   const customerLines = [];
   if (sale.customer_name)  customerLines.push(`Customer: ${sale.customer_name}`);
   if (sale.customer_phone) customerLines.push(`Phone:    ${sale.customer_phone}`);
-  if (isRepair && sale.customer_model) customerLines.push(`Model:    ${sale.customer_model}`);
+  if (sale.customer_model) customerLines.push(`Model:    ${sale.customer_model}`);
   if (isRepair && sale.customer_fault) customerLines.push(`Fault:    ${sale.customer_fault}`);
-  if (!isRepair && sale.customer_imei) customerLines.push(`IMEI:     ${sale.customer_imei}`);
+  if (!isRepair && imeiList.length === 1) customerLines.push(`IMEI:     ${imeiList[0]}`);
+  if (!isRepair && imeiList.length > 1) customerLines.push(`IMEIs:    ${imeiList.join(', ')}`);
 
-  const mobileRepairTnC = [
+  const tncLines = [
     '----------------------------------------',
     'TERMS & CONDITIONS',
-    '1. No refunds or exchange unless phone is',
-    '   faulty and cannot be repaired.',
-    '2. New phones with 12 months warranty will',
-    '   be exchanged/repaired if no physical or',
-    '   water damage (subject to manufacturer).',
-    '3. Second hand phones with 12 months',
-    '   warranty will be repaired if faulty.',
-    '4. Manufacturer can take up to 3 weeks',
-    '   to effect final decision.',
-    '5. No warranty for screen, liquid damage,',
-    '   and physical damage.',
-    '6. All repairs with 12 month warranty,',
-    '   not including liquid or physical damage.',
-    '7. We are not responsible for items not',
-    '   collected within 90 days after repair',
-    '   and reserve the right to dispose of',
-    '   or liquidate them.',
+    '1. Purchased phones can be returned within',
+    '   14 days if in the same condition.',
+    '2. We are not responsible for physical or',
+    '   water damage.',
     '----------------------------------------',
   ];
 
-  const genericTnC = [
+  // VAT Analysis
+  const { rows: vatRows } = computeVatAnalysis(sale.sale_type, items, Number(sale.discount) || 0);
+  const vatLines = vatRows.length ? [
     '----------------------------------------',
-    'TERMS & CONDITIONS',
-    '1. We are happy to exchange items/products',
-    '   within 28 days of purchase. Items should',
-    '   be in same condition with the same',
-    '   packaging and a valid receipt.',
+    'VAT ANALYSIS',
+    ...vatRows.map(r => `Rate:${r.rate}%  Net ${currency}${r.net.toFixed(2)}   VAT ${currency}${r.vat.toFixed(2)}   Total ${currency}${r.total.toFixed(2)}`),
     '----------------------------------------',
-  ];
-
-  const tncLines = hasMobileOrRepair ? mobileRepairTnC : genericTnC;
+  ] : [];
 
   const lines = [
     settings.shop_name.padStart(24 + Math.floor(settings.shop_name.length / 2)).padEnd(40),
@@ -579,6 +642,7 @@ async function showReceiptModal(receiptNo, saleId) {
     `Receipt: ${sale.receipt_no}`,
     `Date:    ${new Date(sale.created_at).toLocaleString()}`,
     isRepair ? 'Type:    Repair Job' : '',
+    `Payment: ${(sale.payment_method || 'cash').toUpperCase()}`,
     ...(customerLines.length ? ['----------------------------------------', ...customerLines] : []),
     '----------------------------------------',
     ...itemLines,
@@ -589,6 +653,7 @@ async function showReceiptModal(receiptNo, saleId) {
     `TOTAL:     ${currency}${Number(sale.total).toFixed(2)}`,
     `Paid:      ${currency}${Number(sale.amount_paid).toFixed(2)}`,
     `Change:    ${currency}${Number(sale.change_due).toFixed(2)}`,
+    ...vatLines,
     ...tncLines,
     settings.receipt_footer || 'Thank you!'
   ].filter(l => l !== '').join('\n');
@@ -823,30 +888,45 @@ async function productsPage(el) {
 // ── Sales History ─────────────────────────────────────────────────────────────
 async function sales(el) {
   let from = firstOfMonth(), to = todayStr();
+  let typeFilter = 'all'; // 'all' | 'sale' | 'repair'
+  let searchQ = '';
 
   async function loadAndRender() {
-    const list = await pos.getSales({ from, to });
+    const list = await pos.getSales({ from, to, type: typeFilter, search: searchQ });
     const total = list.reduce((s, r) => s + r.total, 0);
 
     el.innerHTML = `
       <div class="page-header">
-        <div><div class="page-title">Sales History</div><div class="page-sub">${list.length} transactions</div></div>
+        <div><div class="page-title">Sales &amp; Repairs History</div><div class="page-sub">${list.length} record${list.length !== 1 ? 's' : ''}</div></div>
         <div class="flex">
           <button class="btn btn-ghost btn-sm" onclick="exportRange()">↓ Export CSV</button>
           <button class="btn btn-primary btn-sm" onclick="openReportModal()">📊 Generate Report</button>
+          <button class="btn btn-danger btn-sm" onclick="deleteAllSales()">🗑 Delete All History</button>
         </div>
       </div>
       <div class="card" style="margin-bottom:16px">
-        <div class="flex">
-          <div class="form-group" style="flex:1;margin:0">
+        <div class="flex" style="gap:10px;flex-wrap:wrap">
+          <div class="search-wrap" style="flex:2;min-width:200px">
+            <span class="search-icon">⌕</span>
+            <input type="text" id="s-search" placeholder="Search by receipt, name, phone or model…" value="${searchQ}" oninput="sSearch(this.value)"/>
+          </div>
+          <div class="form-group" style="flex:1;margin:0;min-width:130px">
+            <label class="form-label">Type</label>
+            <select class="form-select" id="s-type" onchange="sTypeFilter(this.value)">
+              <option value="all" ${typeFilter === 'all' ? 'selected' : ''}>All</option>
+              <option value="sale" ${typeFilter === 'sale' ? 'selected' : ''}>Sale</option>
+              <option value="repair" ${typeFilter === 'repair' ? 'selected' : ''}>Repair</option>
+            </select>
+          </div>
+          <div class="form-group" style="flex:1;margin:0;min-width:130px">
             <label class="form-label">From</label>
             <input type="date" class="form-input" id="s-from" value="${from}" onchange="sFilter()"/>
           </div>
-          <div class="form-group" style="flex:1;margin:0">
+          <div class="form-group" style="flex:1;margin:0;min-width:130px">
             <label class="form-label">To</label>
             <input type="date" class="form-input" id="s-to" value="${to}" onchange="sFilter()"/>
           </div>
-          <div class="stat-card" style="--card-accent:var(--accent);margin:0;flex:1;padding:10px 16px">
+          <div class="stat-card" style="--card-accent:var(--accent);margin:0;flex:1;min-width:150px;padding:10px 16px">
             <div class="stat-label">Period Total</div>
             <div class="stat-value" style="font-size:20px">${cur(total)}</div>
           </div>
@@ -856,7 +936,7 @@ async function sales(el) {
         <div class="table-wrap">
           <table>
             <thead><tr>
-              <th>Receipt No</th><th>Date & Time</th><th>Items</th>
+              <th>Receipt No</th><th>Date &amp; Time</th><th>Type</th><th>Customer</th><th>Items</th>
               <th>Total</th><th>Actions</th>
             </tr></thead>
             <tbody>
@@ -864,17 +944,20 @@ async function sales(el) {
         ? list.map(s => `<tr>
                     <td class="mono">${s.receipt_no}</td>
                     <td>${new Date(s.created_at).toLocaleString()}</td>
-                    <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${s.items_summary || '-'}</td>
+                    <td><span class="badge ${s.sale_type === 'repair' ? 'badge-amber' : 'badge-green'}">${s.sale_type === 'repair' ? '🔧 Repair' : '🛒 Sale'}</span></td>
+                    <td>${s.customer_name || '-'}</td>
+                    <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${s.items_summary || '-'}</td>
                     <td class="mono text-accent">${cur(s.total)}</td>
                     <td>
                       <div class="flex">
                         <button class="btn btn-ghost btn-sm" onclick="viewSale(${s.id})">View</button>
                         <button class="btn btn-amber btn-sm" onclick="editSale(${s.id})">Edit</button>
+                        <button class="btn btn-primary btn-sm" onclick="doPrint(${s.id})">🖨</button>
                         <button class="btn btn-danger btn-sm" onclick="deleteSale(${s.id})">Del</button>
                       </div>
                     </td>
                   </tr>`).join('')
-        : `<tr><td colspan="5" class="text-center text-muted" style="padding:40px">No sales in this period</td></tr>`}
+        : `<tr><td colspan="7" class="text-center text-muted" style="padding:40px">No records in this period</td></tr>`}
             </tbody>
           </table>
         </div>
@@ -885,6 +968,14 @@ async function sales(el) {
       to = document.getElementById('s-to').value;
       loadAndRender();
     };
+    window.sTypeFilter = (v) => {
+      typeFilter = v;
+      loadAndRender();
+    };
+    window.sSearch = (v) => {
+      searchQ = v;
+      loadAndRender();
+    };
     window.exportRange = async () => {
       const r = await pos.exportSalesCSV({ from, to });
       if (r.ok) toast('Exported!');
@@ -892,9 +983,17 @@ async function sales(el) {
     };
 
     window.deleteSale = async (id) => {
-      if (!confirm('Delete this sale? This cannot be undone.')) return;
+      if (!confirm('Delete this record? This cannot be undone.')) return;
       const r = await pos.deleteSale(id);
-      if (r.ok) { toast('Sale deleted'); loadAndRender(); }
+      if (r.ok) { toast('Record deleted'); loadAndRender(); }
+      else toast('Delete failed: ' + r.error, 'error');
+    };
+
+    window.deleteAllSales = async () => {
+      if (!confirm('This will permanently delete ALL sales and repair history records. Are you sure you want to continue?')) return;
+      if (!confirm('Please confirm again: ALL history will be erased and cannot be recovered. Delete everything now?')) return;
+      const r = await pos.deleteAllSales();
+      if (r.ok) { toast('All history deleted'); loadAndRender(); }
       else toast('Delete failed: ' + r.error, 'error');
     };
 
@@ -954,22 +1053,31 @@ async function sales(el) {
     window.viewSale = async (id) => {
       const { sale, items } = await pos.getSaleDetail(id);
       const isRepair = (sale.sale_type || '') === 'repair';
+      const imeiList = (sale.customer_imei || '').split(',').map(s => s.trim()).filter(Boolean);
       const customerBlock = (sale.customer_name || sale.customer_phone) ? `
         <div class="card" style="margin-bottom:16px;background:var(--bg3)">
           <div class="card-title">${isRepair ? 'Repair Details' : 'Customer Info'}</div>
           <div class="grid-2">
             ${sale.customer_name  ? `<div><div class="form-label">Name</div><div>${sale.customer_name}</div></div>` : ''}
             ${sale.customer_phone ? `<div><div class="form-label">Phone</div><div>${sale.customer_phone}</div></div>` : ''}
-            ${isRepair && sale.customer_model ? `<div><div class="form-label">Model</div><div>${sale.customer_model}</div></div>` : ''}
+            ${sale.customer_model ? `<div><div class="form-label">Model</div><div>${sale.customer_model}</div></div>` : ''}
             ${isRepair && sale.customer_fault ? `<div><div class="form-label">Fault</div><div>${sale.customer_fault}</div></div>` : ''}
-            ${!isRepair && sale.customer_imei  ? `<div><div class="form-label">IMEI</div><div class="mono">${sale.customer_imei}</div></div>` : ''}
+            ${!isRepair && imeiList.length  ? `<div><div class="form-label">${imeiList.length > 1 ? 'IMEIs' : 'IMEI'}</div><div class="mono">${imeiList.join(', ')}</div></div>` : ''}
           </div>
+        </div>` : '';
+      const { rows: vatRows } = computeVatAnalysis(sale.sale_type, items, Number(sale.discount) || 0);
+      const vatBlock = vatRows.length ? `
+        <div class="card" style="margin-bottom:16px;background:var(--bg3)">
+          <div class="card-title">VAT Analysis</div>
+          ${vatRows.map(r => `<div class="total-row"><span>Rate ${r.rate}% &middot; Net ${cur(r.net)}</span><span class="mono">VAT ${cur(r.vat)} &middot; Total ${cur(r.total)}</span></div>`).join('')}
         </div>` : '';
       openModal('Sale Detail — ' + sale.receipt_no, `
         <div>
           <div class="grid-2" style="margin-bottom:16px">
             <div><div class="form-label">Date</div><div>${new Date(sale.created_at).toLocaleString()}</div></div>
             <div><div class="form-label">Receipt</div><div class="mono">${sale.receipt_no}</div></div>
+            <div><div class="form-label">Type</div><div><span class="badge ${isRepair ? 'badge-amber' : 'badge-green'}">${isRepair ? '🔧 Repair' : '🛒 Sale'}</span></div></div>
+            <div><div class="form-label">Payment</div><div>${(sale.payment_method || 'cash').toUpperCase()}</div></div>
           </div>
           ${customerBlock}
           <table style="margin-bottom:16px">
@@ -986,11 +1094,12 @@ async function sales(el) {
           <div class="cart-totals" style="background:var(--bg3);border-radius:var(--radius);padding:12px">
             <div class="total-row"><span>Subtotal</span><span class="mono">${cur(sale.subtotal)}</span></div>
             <div class="total-row"><span>Discount</span><span class="mono text-red">-${cur(sale.discount)}</span></div>
-            <div class="total-row"><span>Tax</span><span class="mono">${cur(sale.tax)}</span></div>
+            <div class="total-row"><span>VAT</span><span class="mono">${cur(sale.tax)}</span></div>
             <div class="total-row grand"><span>TOTAL</span><span class="mono text-accent">${cur(sale.total)}</span></div>
             <div class="total-row"><span>Paid</span><span class="mono">${cur(sale.amount_paid)}</span></div>
             <div class="total-row"><span>Change</span><span class="mono">${cur(sale.change_due)}</span></div>
           </div>
+          ${vatBlock}
           <div style="margin-top:12px">
             <button class="btn btn-primary btn-sm" onclick="doPrint(${sale.id})">🖨 Print Receipt</button>
           </div>
@@ -1010,9 +1119,9 @@ async function sales(el) {
         const subtotal = editItems.reduce((s, i) => s + i.price * i.quantity, 0);
         const discountEl = document.getElementById('edit-discount');
         const discount = parseFloat(discountEl?.value || 0) || 0;
-        const taxRate = parseFloat(settings.tax_rate || 0) / 100;
         const taxable = Math.max(subtotal - discount, 0);
-        const tax = taxable * taxRate;
+        const { totalVat } = computeVatAnalysis(sale.sale_type, editItems, discount);
+        const tax = totalVat;
         const total = taxable + tax;
         const el2 = id => document.getElementById(id);
         if (el2('edit-sub')) el2('edit-sub').textContent = cur(subtotal);
@@ -1050,9 +1159,9 @@ async function sales(el) {
       window.saveEditedSale = async () => {
         const discount = parseFloat(document.getElementById('edit-discount').value) || 0;
         const subtotal = editItems.reduce((s, i) => s + i.price * i.quantity, 0);
-        const taxRate = parseFloat(settings.tax_rate || 0) / 100;
         const taxable = Math.max(subtotal - discount, 0);
-        const tax = taxable * taxRate;
+        const { totalVat } = computeVatAnalysis(sale.sale_type, editItems, discount);
+        const tax = totalVat;
         const total = taxable + tax;
         const amount_paid = total;
         const change_due = 0;
@@ -1083,7 +1192,7 @@ async function sales(el) {
           </div>
           <div class="cart-totals" style="background:var(--bg3);border-radius:var(--radius);padding:12px;margin-bottom:12px">
             <div class="total-row"><span>Subtotal</span><span class="mono" id="edit-sub">-</span></div>
-            <div class="total-row"><span>Tax (${settings.tax_rate || 0}%)</span><span class="mono" id="edit-tax">-</span></div>
+            <div class="total-row"><span>VAT</span><span class="mono" id="edit-tax">-</span></div>
             <div class="total-row grand"><span>TOTAL</span><span class="mono text-accent" id="edit-total">-</span></div>
           </div>
           <div style="display:flex;gap:10px">
@@ -1208,12 +1317,14 @@ async function settingsPage(el) {
           <input class="form-input" id="s-footer" value="${s.receipt_footer || ''}"/></div>
       </div>
       <div class="card" style="margin-bottom:20px">
-        <div class="card-title">Tax & Currency</div>
-        <div class="form-row">
-          <div class="form-group"><label class="form-label">Currency Symbol</label>
-            <input class="form-input" id="s-currency" value="${s.currency || '€'}" maxlength="3"/></div>
-          <div class="form-group"><label class="form-label">Tax Rate (%)</label>
-            <input class="form-input" id="s-tax" type="number" min="0" max="100" step="0.1" value="${s.tax_rate || 0}"/></div>
+        <div class="card-title">Currency &amp; VAT</div>
+        <div class="form-group"><label class="form-label">Currency Symbol</label>
+          <input class="form-input" id="s-currency" value="${s.currency || '€'}" maxlength="3"/></div>
+        <div style="font-size:12px;color:var(--text2);background:var(--bg3);border-radius:var(--radius);padding:10px 12px;line-height:1.6">
+          VAT rates are fixed and applied automatically:<br>
+          • <strong>23%</strong> standard rate on regular sales<br>
+          • <strong>13%</strong> flat rate on repair jobs<br>
+          • <strong>0%</strong> on phone purchases (Mobile category)
         </div>
       </div>
       <div class="card" style="margin-bottom:20px">
@@ -1277,7 +1388,6 @@ async function settingsPage(el) {
       shop_phone: document.getElementById('s-phone').value.trim(),
       receipt_footer: document.getElementById('s-footer').value.trim(),
       currency: document.getElementById('s-currency').value.trim() || '€',
-      tax_rate: document.getElementById('s-tax').value,
       printer_enabled: document.getElementById('s-printer').value,
       printer_port: document.getElementById('s-port').value.trim(),
       drawer_enabled: document.getElementById('s-drawer').value,
@@ -1357,145 +1467,6 @@ window.runRawTest = async () => {
       : 'Failed: ' + last.msg}
     </div>`;
 };
-
-// ── Repair History ────────────────────────────────────────────────────────────
-async function repairHistory(el) {
-  let from = firstOfMonth(), to = todayStr();
-  let searchQ = '';
-
-  async function loadAndRender() {
-    const list = await pos.getRepairSales({ from, to, search: searchQ });
-
-    el.innerHTML = `
-      <div class="page-header">
-        <div><div class="page-title">Repair History</div><div class="page-sub">${list.length} repair job${list.length !== 1 ? 's' : ''}</div></div>
-        <button class="btn btn-primary btn-sm" onclick="navigate('pos')">🔧 New Repair</button>
-      </div>
-
-      <div class="card" style="margin-bottom:16px">
-        <div class="flex" style="gap:10px;flex-wrap:wrap">
-          <div class="search-wrap" style="flex:2;min-width:200px">
-            <span class="search-icon">⌕</span>
-            <input type="text" id="rep-search" placeholder="Search by name, phone or model…" value="${searchQ}" oninput="repSearch(this.value)"/>
-          </div>
-          <div class="form-group" style="flex:1;margin:0;min-width:130px">
-            <label class="form-label">From</label>
-            <input type="date" class="form-input" id="rep-from" value="${from}" onchange="repFilter()"/>
-          </div>
-          <div class="form-group" style="flex:1;margin:0;min-width:130px">
-            <label class="form-label">To</label>
-            <input type="date" class="form-input" id="rep-to" value="${to}" onchange="repFilter()"/>
-          </div>
-          <div style="display:flex;align-items:flex-end">
-            <button class="btn btn-ghost btn-sm" onclick="repSearch('')">Clear</button>
-          </div>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="table-wrap">
-          <table>
-            <thead><tr>
-              <th>Receipt</th>
-              <th>Date</th>
-              <th>Customer</th>
-              <th>Phone</th>
-              <th>Model</th>
-              <th>Fault</th>
-              <th>Total</th>
-              <th>Actions</th>
-            </tr></thead>
-            <tbody>
-              ${list.length ? list.map(s => `<tr>
-                <td class="mono" style="font-size:11px">${s.receipt_no}</td>
-                <td style="font-size:12px">${new Date(s.created_at).toLocaleString()}</td>
-                <td><strong>${s.customer_name || '-'}</strong></td>
-                <td class="mono">${s.customer_phone || '-'}</td>
-                <td>${s.customer_model || '-'}</td>
-                <td style="max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text2)">${s.customer_fault || '-'}</td>
-                <td class="mono text-accent">${cur(s.total)}</td>
-                <td>
-                  <div class="flex">
-                    <button class="btn btn-ghost btn-sm" onclick="viewRepair(${s.id})">View</button>
-                    <button class="btn btn-primary btn-sm" onclick="doPrint(${s.id})">🖨</button>
-                    <button class="btn btn-danger btn-sm" onclick="deleteRepair(${s.id})">Del</button>
-                  </div>
-                </td>
-              </tr>`).join('') : `
-                <tr><td colspan="8" class="text-center text-muted" style="padding:40px">
-                  ${searchQ ? 'No repairs found matching "' + searchQ + '"' : 'No repair jobs in this period'}
-                </td></tr>`}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    `;
-
-    window.repFilter = () => {
-      from = document.getElementById('rep-from').value;
-      to   = document.getElementById('rep-to').value;
-      loadAndRender();
-    };
-    window.repSearch = (v) => {
-      searchQ = v;
-      if (document.getElementById('rep-search')) document.getElementById('rep-search').value = v;
-      loadAndRender();
-    };
-
-    window.viewRepair = async (id) => {
-      const { sale, items } = await pos.getSaleDetail(id);
-      openModal('Repair Job — ' + sale.receipt_no, `
-        <div>
-          <div class="grid-2" style="margin-bottom:16px">
-            <div><div class="form-label">Date</div><div>${new Date(sale.created_at).toLocaleString()}</div></div>
-            <div><div class="form-label">Receipt No</div><div class="mono">${sale.receipt_no}</div></div>
-          </div>
-          <div class="card" style="margin-bottom:16px;background:var(--bg3)">
-            <div class="card-title">Repair Details</div>
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-              <div><div class="form-label">Customer Name</div><div style="font-weight:600">${sale.customer_name || '-'}</div></div>
-              <div><div class="form-label">Phone Number</div><div class="mono">${sale.customer_phone || '-'}</div></div>
-              <div><div class="form-label">Device Model</div><div>${sale.customer_model || '-'}</div></div>
-              <div><div class="form-label">Fault</div><div style="color:var(--amber)">${sale.customer_fault || '-'}</div></div>
-            </div>
-          </div>
-          <table style="margin-bottom:16px">
-            <thead><tr><th>Service / Item</th><th>Qty</th><th>Price</th><th>Subtotal</th></tr></thead>
-            <tbody>
-              ${items.map(i => `<tr>
-                <td>${i.name}</td>
-                <td class="mono">${i.quantity}</td>
-                <td class="mono">${cur(i.price)}</td>
-                <td class="mono text-accent">${cur(i.subtotal)}</td>
-              </tr>`).join('')}
-            </tbody>
-          </table>
-          <div class="cart-totals" style="background:var(--bg3);border-radius:var(--radius);padding:12px;margin-bottom:12px">
-            <div class="total-row"><span>Subtotal</span><span class="mono">${cur(sale.subtotal)}</span></div>
-            <div class="total-row"><span>Discount</span><span class="mono text-red">-${cur(sale.discount)}</span></div>
-            <div class="total-row"><span>Tax</span><span class="mono">${cur(sale.tax)}</span></div>
-            <div class="total-row grand"><span>TOTAL</span><span class="mono text-accent">${cur(sale.total)}</span></div>
-            <div class="total-row"><span>Paid</span><span class="mono">${cur(sale.amount_paid)}</span></div>
-            <div class="total-row"><span>Change</span><span class="mono">${cur(sale.change_due)}</span></div>
-          </div>
-          <div style="display:flex;gap:8px">
-            <button class="btn btn-ghost" onclick="closeModal()">Close</button>
-            <button class="btn btn-primary btn-sm" onclick="doPrint(${sale.id})">🖨 Print Receipt</button>
-          </div>
-        </div>
-      `, true);
-    };
-
-    window.deleteRepair = async (id) => {
-      if (!confirm('Delete this repair record? This cannot be undone.')) return;
-      const r = await pos.deleteSale(id);
-      if (r.ok) { toast('Repair deleted'); loadAndRender(); }
-      else toast('Delete failed: ' + r.error, 'error');
-    };
-  }
-
-  await loadAndRender();
-}
 
 // ── Keyboard Shortcut ─────────────────────────────────────────────────────────
 document.addEventListener('keydown', e => {

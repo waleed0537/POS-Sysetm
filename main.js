@@ -117,9 +117,9 @@ function initDatabase() {
 
   // Default settings
   const defaults = {
-    shop_name: 'Electro Xchange',
-    shop_address: 'Unit 34 Sky Court, Shannon Town Centre, Shannon, V14 DX50',
-    shop_phone: '089 944 1411',
+    shop_name: 'Little Ireland Gadgets',
+    shop_address: "10 William St, Prior's-Land, Limerick, V94 FD73",
+    shop_phone: '(061) 596 679',
     tax_rate: '0',
     currency: '€',
     receipt_footer: 'Thank you for your purchase!',
@@ -131,9 +131,10 @@ function initDatabase() {
   const insertSetting = db.prepare(`INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)`);
   for (const [k, v] of Object.entries(defaults)) insertSetting.run(k, v);
 
-  // Force-update address and phone in case the DB already existed with old values
-  db.prepare(`UPDATE settings SET value = ? WHERE key = 'shop_address'`).run('Unit 34 Sky Court, Shannon Town Centre, Shannon, V14 DX50');
-  db.prepare(`UPDATE settings SET value = ? WHERE key = 'shop_phone'`).run('089 944 1411');
+  // Force-update shop name/address/phone in case the DB already existed with old values
+  db.prepare(`UPDATE settings SET value = ? WHERE key = 'shop_name'`).run('Little Ireland Gadgets');
+  db.prepare(`UPDATE settings SET value = ? WHERE key = 'shop_address'`).run("10 William St, Prior's-Land, Limerick, V94 FD73");
+  db.prepare(`UPDATE settings SET value = ? WHERE key = 'shop_phone'`).run('(061) 596 679');
 
   // Sample category
   db.prepare(`INSERT OR IGNORE INTO categories (name) VALUES (?)`).run('General');
@@ -176,6 +177,45 @@ function generateReceiptNo() {
 function getSetting(key) {
   const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
   return row ? row.value : '';
+}
+
+// ─── VAT Analysis ───────────────────────────────────────────────────────────────
+// Rules: Repairs are taxed flat at 13% VAT on the whole job.
+// Regular sales are taxed at 23% VAT, EXCEPT items in the "Mobile" category
+// (phone purchases), which carry no VAT (second-hand margin scheme).
+// Returns an array of { rate, net, vat, total } rows — one row per VAT rate
+// that actually applies (zero-rated phone portions are not shown as a row).
+const VAT_STANDARD_RATE = 0.23;
+const VAT_REPAIR_RATE = 0.13;
+function isPhoneCategory(name) {
+  const c = String(name || '').toLowerCase().trim();
+  return c === 'mobile' || c === 'phone' || c === 'phones';
+}
+function computeVatAnalysis(sale, items) {
+  const isRepair = (sale.sale_type || '').toLowerCase() === 'repair';
+  const discount = Number(sale.discount) || 0;
+
+  if (isRepair) {
+    const subtotal = Number(sale.subtotal) || 0;
+    const net = Math.max(subtotal - discount, 0);
+    const vat = net * VAT_REPAIR_RATE;
+    return [{ rate: 13, net, vat, total: net + vat }];
+  }
+
+  let phoneSub = 0, otherSub = 0;
+  for (const i of (items || [])) {
+    const amt = Number(i.subtotal != null ? i.subtotal : (i.price * i.quantity)) || 0;
+    if (isPhoneCategory(i.category_name || i.category)) phoneSub += amt;
+    else otherSub += amt;
+  }
+  const totalSub = phoneSub + otherSub;
+  const discOther = totalSub > 0 ? discount * (otherSub / totalSub) : discount;
+  const otherNet = Math.max(otherSub - discOther, 0);
+  const vat = otherNet * VAT_STANDARD_RATE;
+
+  const rows = [];
+  if (otherNet > 0) rows.push({ rate: 23, net: otherNet, vat, total: otherNet + vat });
+  return rows;
 }
 
 // ─── Cash Drawer ──────────────────────────────────────────────────────────────
@@ -326,11 +366,21 @@ ipcMain.handle('complete-sale', (_, { items, subtotal, discount, tax, total, pay
   } catch(e) { return { ok: false, error: e.message }; }
 });
 
-ipcMain.handle('get-sales', (_, { from, to }) => {
-  return db.prepare(`SELECT s.*, GROUP_CONCAT(si.name || ' x' || si.quantity, ', ') as items_summary
+ipcMain.handle('get-sales', (_, { from, to, type, search }) => {
+  let query = `SELECT s.*, GROUP_CONCAT(si.name || ' x' || si.quantity, ', ') as items_summary
     FROM sales s LEFT JOIN sale_items si ON s.id = si.sale_id
-    WHERE date(s.created_at) BETWEEN ? AND ?
-    GROUP BY s.id ORDER BY s.created_at DESC`).all(from, to);
+    WHERE date(s.created_at) BETWEEN ? AND ?`;
+  const params = [from, to];
+  if (type === 'sale' || type === 'repair') {
+    query += ` AND s.sale_type = ?`;
+    params.push(type);
+  }
+  if (search) {
+    query += ` AND (s.receipt_no LIKE ? OR s.customer_name LIKE ? OR s.customer_phone LIKE ? OR s.customer_model LIKE ?)`;
+    params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
+  }
+  query += ` GROUP BY s.id ORDER BY s.created_at DESC`;
+  return db.prepare(query).all(...params);
 });
 
 ipcMain.handle('get-repair-sales', (_, { from, to, search }) => {
@@ -468,48 +518,43 @@ function buildReceiptHTML(sale, items, settings) {
   const taxRow = Number(sale.tax) > 0
     ? `<tr><td colspan="3" class="tlabel">Tax</td><td class="tval">${fmt(sale.tax)}</td></tr>` : '';
 
-  // Customer info section
+  // Customer info section (multiple IMEIs are stored comma-separated)
+  const imeiList = (sale.customer_imei || '').split(',').map(s => s.trim()).filter(Boolean);
   const customerSection = (sale.customer_name || sale.customer_phone) ? `
   <hr/>
   <div class="customer-section">
     ${sale.customer_name  ? `<div class="customer-line"><span class="customer-label">Customer:</span> ${esc(sale.customer_name)}</div>` : ''}
     ${sale.customer_phone ? `<div class="customer-line"><span class="customer-label">Phone:</span> ${esc(sale.customer_phone)}</div>` : ''}
-    ${isRepair && sale.customer_model ? `<div class="customer-line"><span class="customer-label">Model:</span> ${esc(sale.customer_model)}</div>` : ''}
+    ${sale.customer_model ? `<div class="customer-line"><span class="customer-label">Model:</span> ${esc(sale.customer_model)}</div>` : ''}
     ${isRepair && sale.customer_fault ? `<div class="customer-line"><span class="customer-label">Fault:</span> ${esc(sale.customer_fault)}</div>` : ''}
-    ${!isRepair && sale.customer_imei ? `<div class="customer-line"><span class="customer-label">IMEI:</span> ${esc(sale.customer_imei)}</div>` : ''}
+    ${!isRepair && imeiList.length === 1 ? `<div class="customer-line"><span class="customer-label">IMEI:</span> ${esc(imeiList[0])}</div>` : ''}
+    ${!isRepair && imeiList.length > 1 ? `<div class="customer-line"><span class="customer-label">IMEIs:</span> ${imeiList.map(esc).join(', ')}</div>` : ''}
   </div>` : '';
 
-  const mobileRepairTnC = `
+  const tncSection = `
   <hr/>
   <div class="tnc-section">
     <div class="tnc-title">TERMS &amp; CONDITIONS</div>
     <ol class="tnc-list">
-      <li>No refunds or exchange unless phone is faulty and cannot be repaired.</li>
-      <li>New phones with 12 months warranty will be exchanged or repaired if there is no physical or water damage and subject to decision of manufacturer.</li>
-      <li>Second hand phones with 12 months warranty will be repaired if faulty.</li>
-      <li>Manufacturer can take up to three weeks to effect final decision on repair or replacement.</li>
-      <li>No warranty for screen, liquid damage, and physical damage.</li>
-      <li>All repairs with 12 month warranty, not including liquid or physical damage.</li>
-      <li>We are not responsible for the item not collected within 90 days after repair and reserve the right to dispose of or liquidate them.</li>
+      <li>Purchased phones can be returned within 14 days if in the same condition.</li>
+      <li>We are not responsible for physical/water damage.</li>
     </ol>
   </div>`;
 
-  const genericTnC = `
-  <hr/>
-  <div class="tnc-section">
-    <div class="tnc-title">TERMS &amp; CONDITIONS</div>
-    <ol class="tnc-list">
-      <li>We are happy to exchange items/products within 28 days of purchase. Items should be in same condition with the same packaging and a valid receipt.</li>
-    </ol>
-  </div>`;
-
-  const tncSection = hasMobileOrRepair ? mobileRepairTnC : genericTnC;
-
-  // IMEI blank line only for non-repair mobile items (repair has model in customer section)
-  const imeiSection = (!isRepair && hasMobileOrRepair && !sale.customer_imei) ? `
+  // IMEI blank line only for non-repair mobile items with no IMEI captured yet
+  const imeiSection = (!isRepair && hasMobileOrRepair && imeiList.length === 0) ? `
   <hr/>
   <div class="imei-section">
     <div class="imei-line">IMEI: ______________________________</div>
+  </div>` : '';
+
+  // VAT Analysis
+  const vatRows = computeVatAnalysis(sale, items);
+  const vatSection = vatRows.length ? `
+  <hr/>
+  <div class="vat-section">
+    <div class="tnc-title">VAT ANALYSIS</div>
+    ${vatRows.map(r => `<div class="vat-row">Rate:${r.rate}%  Net ${fmt(r.net)}   VAT ${fmt(r.vat)}   Total ${fmt(r.total)}</div>`).join('')}
   </div>` : '';
 
   return `<!DOCTYPE html>
@@ -651,6 +696,17 @@ function buildReceiptHTML(sale, items, settings) {
     margin-bottom: 1px;
   }
 
+  /* ── VAT ANALYSIS ── */
+  .vat-section {
+    padding: 3px 0;
+  }
+  .vat-row {
+    font-size: 10px;
+    font-family: 'Courier New', monospace;
+    white-space: pre;
+    line-height: 1.5;
+  }
+
   /* ── FOOTER ── */
   .footer {
     text-align: center;
@@ -668,7 +724,6 @@ function buildReceiptHTML(sale, items, settings) {
 </head>
 <body>
 
-
   <!-- HEADER -->
   <div class="header">
     <div class="shop-name">${esc(settings.shop_name)}</div>
@@ -684,7 +739,8 @@ function buildReceiptHTML(sale, items, settings) {
   <!-- RECEIPT INFO -->
   <div class="meta">
     <strong>Receipt:</strong> ${esc(sale.receipt_no)}<br>
-    <strong>Date:</strong> ${new Date(sale.created_at).toLocaleString()}${isRepair ? '<br><strong>Type:</strong> Repair Job' : ''}
+    <strong>Date:</strong> ${new Date(sale.created_at).toLocaleString()}${isRepair ? '<br><strong>Type:</strong> Repair Job' : ''}<br>
+    <strong>Payment:</strong> ${esc((sale.payment_method || 'cash').toUpperCase())}
   </div>
 
   <hr/>
@@ -715,6 +771,8 @@ function buildReceiptHTML(sale, items, settings) {
       <tr><td class="tlabel">Change</td><td class="tval">${fmt(sale.change_due)}</td></tr>
     </table>
   </div>
+
+  ${vatSection}
 
   ${tncSection}
 
@@ -935,6 +993,18 @@ ipcMain.handle('delete-sale', (_, id) => {
   } catch(e) { return { ok: false, error: e.message }; }
 });
 
+// Delete ALL sales/repair history records
+ipcMain.handle('delete-all-sales', () => {
+  try {
+    const doTx = db.transaction(() => {
+      db.prepare('DELETE FROM sale_items').run();
+      db.prepare('DELETE FROM sales').run();
+    });
+    doTx();
+    return { ok: true };
+  } catch(e) { return { ok: false, error: e.message }; }
+});
+
 // Update Sale
 ipcMain.handle('update-sale', (_, { id, discount, tax, total, amount_paid, change_due, items, sale_type, customer_name, customer_phone, customer_imei, customer_fault, customer_model }) => {
   try {
@@ -961,7 +1031,7 @@ ipcMain.handle('update-sale', (_, { id, discount, tax, total, amount_paid, chang
 // Generate Sales Report PDF
 ipcMain.handle('generate-report-pdf', async (_, { from, to, period }) => {
   const { filePath } = await dialog.showSaveDialog({
-    defaultPath: `electro-xchange-report-${period}-${from}.pdf`,
+    defaultPath: `little-ireland-gadgets-report-${period}-${from}.pdf`,
     filters: [{ name: 'PDF', extensions: ['pdf'] }]
   });
   if (!filePath) return { ok: false };
@@ -1166,7 +1236,7 @@ ipcMain.handle('generate-report-pdf', async (_, { from, to, period }) => {
 <div class="report-header">
   <div class="rh-top">
     <div>
-      <div class="shop-name">${settings.shop_name || 'Electro Xchange'}</div>
+      <div class="shop-name">${settings.shop_name || 'Little Ireland Gadgets'}</div>
       <div class="shop-sub">Sales Report &nbsp;·&nbsp; ${settings.shop_address || ''}</div>
     </div>
     <div class="report-badge">
@@ -1283,7 +1353,7 @@ ipcMain.handle('generate-report-pdf', async (_, { from, to, period }) => {
 
 <!-- FOOTER -->
 <div class="report-footer">
-  <span>${settings.shop_name || 'Electro Xchange'} &nbsp;·&nbsp; ${settings.shop_address || ''} &nbsp;·&nbsp; ${settings.shop_phone || ''}</span>
+  <span>${settings.shop_name || 'Little Ireland Gadgets'} &nbsp;·&nbsp; ${settings.shop_address || ''} &nbsp;·&nbsp; ${settings.shop_phone || ''}</span>
   <span>Generated ${new Date().toLocaleString()}</span>
 </div>
 

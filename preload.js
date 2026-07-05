@@ -37,4 +37,6 @@ contextBridge.exposeInMainWorld('pos', {
   updateSale:        (data)  => ipcRenderer.invoke('update-sale', data),
 deleteSale:        (id)    => ipcRenderer.invoke('delete-sale', id),
 generateReportPDF: (opts)         => ipcRenderer.invoke('generate-report-pdf', opts),
+  deleteAllSales: () => ipcRenderer.invoke('delete-all-sales'),
+
 });
