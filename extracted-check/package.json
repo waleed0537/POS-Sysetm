@@ -1,0 +1,13 @@
+{
+  "name": "mobile-shop-pos",
+  "version": "1.0.0",
+  "description": "POS System for Mobile Shop",
+  "main": "main.js",
+  "dependencies": {
+    "better-sqlite3": "^9.4.3",
+    "escpos": "^3.0.0-alpha.6",
+    "escpos-usb": "^3.0.0-alpha.4"
+  },
+  "author": "Your Name",
+  "license": "MIT"
+}

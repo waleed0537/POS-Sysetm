@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; script-src 'self' 'unsafe-inline'"/>
+  <title>MobileShop POS</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet"/>
+  <link rel="stylesheet" href="css/main.css"/>
+</head>
+<body>
+  <div id="app">
+    <!-- Sidebar -->
+    <nav id="sidebar">
+      <div class="sidebar-brand">
+        <span class="brand-icon">◈</span>
+        <div>
+          <div class="brand-name" id="nav-shop-name">MobileShop POS</div>
+          <div class="brand-sub">Point of Sale</div>
+        </div>
+      </div>
+      <ul class="nav-links">
+        <li><a href="#" class="nav-item active" data-page="dashboard">
+          <span class="nav-icon">▦</span> Dashboard
+        </a></li>
+        <li><a href="#" class="nav-item" data-page="pos">
+          <span class="nav-icon">◉</span> New Sale
+        </a></li>
+        <li><a href="#" class="nav-item" data-page="products">
+          <span class="nav-icon">▤</span> Products
+        </a></li>
+        <li><a href="#" class="nav-item" data-page="sales">
+          <span class="nav-icon">▥</span> Sales History
+        </a></li>
+        <li><a href="#" class="nav-item" data-page="repairs">
+          <span class="nav-icon">🔧</span> Repair History
+        </a></li>
+        <li><a href="#" class="nav-item" data-page="expenses">
+          <span class="nav-icon">▧</span> Expenses
+        </a></li>
+        <li><a href="#" class="nav-item" data-page="settings">
+          <span class="nav-icon">◎</span> Settings
+        </a></li>
+      </ul>
+      <div class="sidebar-footer">
+        <div id="nav-time" class="nav-clock"></div>
+        <div id="nav-date" class="nav-date"></div>
+      </div>
+    </nav>
+
+    <!-- Main Content -->
+    <main id="main-content">
+      <div id="page-container"></div>
+    </main>
+  </div>
+
+  <!-- Modal -->
+  <div id="modal-overlay" class="hidden">
+    <div id="modal-box">
+      <div id="modal-header">
+        <span id="modal-title"></span>
+        <button id="modal-close" onclick="closeModal()">✕</button>
+      </div>
+      <div id="modal-body"></div>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div id="toast-container"></div>
+
+  <script src="js/app.js"></script>
+</body>
+</html>

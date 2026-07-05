@@ -1,0 +1,47 @@
+{
+  "name": "mobile-shop-pos",
+  "version": "1.0.0",
+  "description": "POS System for Mobile Shop",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "package": "electron-builder build --win --publish never"
+  },
+  "dependencies": {
+    "better-sqlite3": "^9.4.3",
+    "escpos": "^3.0.0-alpha.6",
+    "escpos-usb": "^3.0.0-alpha.4"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^4.0.3",
+    "electron": "^29.0.0",
+    "electron-builder": "^24.9.1"
+  },
+  "build": {
+    "appId": "com.mobileshop.pos",
+    "productName": "MobileShop POS",
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "src/**/*",
+      "assets/**/*",
+      "node_modules/**/*",
+      "!node_modules/.cache/**/*"
+    ],
+    "extraResources": [],
+    "asar": true
+  },
+  "author": "Your Name",
+  "license": "MIT"
+}
